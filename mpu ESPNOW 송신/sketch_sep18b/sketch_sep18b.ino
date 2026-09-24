@@ -11,6 +11,11 @@ uint8_t broadcastAddress[] = {
   0xFF, 0xFF, 0xFF
 };
 
+
+// ================================
+// 전송 데이터
+// ================================
+
 struct MotionPacket {
   uint32_t sequence;
   float movement;
@@ -20,27 +25,37 @@ struct MotionPacket {
 MotionPacket packet;
 
 
-// 자이로 이전 값
-float previousGX = 0;
-float previousGY = 0;
-float previousGZ = 0;
+// ================================
+// 가속도 이전 값
+// ================================
+
+float previousX = 0;
+float previousY = 0;
+float previousZ = 0;
 
 bool firstReading = true;
 
 
 // ================================
-// 자이로 읽기
+// MPU-6050 가속도 + 자이로 읽기
 // ================================
-bool readGyroscope(
+
+bool readMotion(
+  float &x,
+  float &y,
+  float &z,
   float &gx,
   float &gy,
   float &gz
 ) {
 
-  Wire.beginTransmission(MPU_ADDRESS);
+  // MPU 데이터 시작 주소
+  // 0x3B부터 시작하면
+  // ACC X/Y/Z + 온도 + GYRO X/Y/Z를
+  // 한 번에 읽을 수 있음
 
-  // 자이로 데이터 시작 레지스터
-  Wire.write(0x43);
+  Wire.beginTransmission(MPU_ADDRESS);
+  Wire.write(0x3B);
 
   byte error = Wire.endTransmission(false);
 
@@ -48,15 +63,49 @@ bool readGyroscope(
     return false;
   }
 
+
+  // 총 14바이트
+  // ACC 6
+  // TEMP 2
+  // GYRO 6
+
   int received = Wire.requestFrom(
     MPU_ADDRESS,
-    (uint8_t)6,
+    (uint8_t)14,
     true
   );
 
-  if (received != 6) {
+  if (received != 14) {
     return false;
   }
+
+
+  // ================================
+  // 가속도 RAW 값
+  // ================================
+
+  int16_t rawX =
+    (Wire.read() << 8) | Wire.read();
+
+  int16_t rawY =
+    (Wire.read() << 8) | Wire.read();
+
+  int16_t rawZ =
+    (Wire.read() << 8) | Wire.read();
+
+
+  // ================================
+  // 온도 데이터
+  // 사용하지 않음
+  // ================================
+
+  Wire.read();
+  Wire.read();
+
+
+  // ================================
+  // 자이로 RAW 값
+  // ================================
 
   int16_t rawGX =
     (Wire.read() << 8) | Wire.read();
@@ -68,12 +117,23 @@ bool readGyroscope(
     (Wire.read() << 8) | Wire.read();
 
 
-  // 기본 설정 ±250 °/s
-  // 감도 = 131 LSB / (°/s)
+  // ================================
+  // 실제 단위로 변환
+  // ================================
 
+  // 가속도
+  // 기본 설정 ±2g
+  x = rawX / 16384.0;
+  y = rawY / 16384.0;
+  z = rawZ / 16384.0;
+
+
+  // 자이로
+  // 기본 설정 ±250 °/s
   gx = rawGX / 131.0;
   gy = rawGY / 131.0;
   gz = rawGZ / 131.0;
+
 
   return true;
 }
@@ -95,7 +155,9 @@ void setup() {
   Wire.setTimeOut(100);
 
 
+  // ================================
   // MPU 절전모드 해제
+  // ================================
 
   Wire.beginTransmission(MPU_ADDRESS);
 
@@ -164,11 +226,15 @@ void setup() {
 
   packet.sequence = 0;
 
-  Serial.println("GYRO SENDER READY");
+  Serial.println("ACC + GYRO SENDER READY");
 }
 
 
 void loop() {
+
+  float x;
+  float y;
+  float z;
 
   float gx;
   float gy;
@@ -176,12 +242,21 @@ void loop() {
 
 
   // ================================
-  // 자이로 데이터 읽기
+  // 가속도 + 자이로 읽기
   // ================================
 
-  if (!readGyroscope(gx, gy, gz)) {
+  if (
+    !readMotion(
+      x,
+      y,
+      z,
+      gx,
+      gy,
+      gz
+    )
+  ) {
 
-    Serial.println("GYRO READ FAILED");
+    Serial.println("MPU READ FAILED");
 
     delay(100);
 
@@ -195,9 +270,9 @@ void loop() {
 
   if (firstReading) {
 
-    previousGX = gx;
-    previousGY = gy;
-    previousGZ = gz;
+    previousX = x;
+    previousY = y;
+    previousZ = z;
 
     firstReading = false;
 
@@ -207,9 +282,35 @@ void loop() {
   }
 
 
-  // ================================
-  // 현재 자이로 값의 크기 계산
-  // ================================
+  // ==================================================
+  // 1. 가속도 변화량 계산
+  // ==================================================
+
+  float differenceX =
+    abs(x - previousX);
+
+  float differenceY =
+    abs(y - previousY);
+
+  float differenceZ =
+    abs(z - previousZ);
+
+
+  // 기존 코드와 동일한 방식
+  float accelerationMovement =
+    differenceX +
+    differenceY +
+    differenceZ;
+
+
+  previousX = x;
+  previousY = y;
+  previousZ = z;
+
+
+  // ==================================================
+  // 2. 자이로 회전 속도 계산
+  // ==================================================
 
   float gyroMagnitude =
     sqrt(
@@ -219,42 +320,90 @@ void loop() {
     );
 
 
-  // ================================
-  // 회전 속도 → 진동 세기
-  // ================================
+  // ==================================================
+  // 3. 가속도 정규화
+  // ==================================================
+
+  const float MIN_ACCEL = 0.03;
+  const float MAX_ACCEL = 1.00;
+
+  float accelerationNormalized = 0;
+
+
+  if (accelerationMovement > MIN_ACCEL) {
+
+    accelerationNormalized =
+      (accelerationMovement - MIN_ACCEL) /
+      (MAX_ACCEL - MIN_ACCEL);
+
+    accelerationNormalized =
+      constrain(
+        accelerationNormalized,
+        0.0,
+        1.0
+      );
+  }
+
+
+  // ==================================================
+  // 4. 자이로 정규화
+  // ==================================================
 
   const float MIN_GYRO = 5.0;
   const float MAX_GYRO = 250.0;
 
-  int intensity = 0;
+  float gyroNormalized = 0;
 
 
   if (gyroMagnitude > MIN_GYRO) {
 
-    float normalized =
+    gyroNormalized =
       (gyroMagnitude - MIN_GYRO) /
       (MAX_GYRO - MIN_GYRO);
 
-    normalized =
+    gyroNormalized =
       constrain(
-        normalized,
+        gyroNormalized,
         0.0,
         1.0
       );
-
-    intensity =
-      normalized * 127;
   }
 
 
-  // ================================
-  // ESP-NOW 전송
-  // ================================
+  // ==================================================
+  // 5. 가속도 + 자이로 결합
+  // ==================================================
+
+  // 현재는 50 : 50
+  float combinedMovement =
+    (accelerationNormalized * 0.5) +
+    (gyroNormalized * 0.5);
+
+
+  // ==================================================
+  // 6. 진동 세기로 변환
+  // ==================================================
+
+  int intensity =
+    combinedMovement * 127;
+
+
+  intensity =
+    constrain(
+      intensity,
+      0,
+      127
+    );
+
+
+  // ==================================================
+  // 7. ESP-NOW 전송
+  // ==================================================
 
   packet.sequence++;
 
   packet.movement =
-    gyroMagnitude;
+    combinedMovement;
 
   packet.intensity =
     intensity;
@@ -268,28 +417,33 @@ void loop() {
     );
 
 
-  // ================================
-  // Serial Monitor
-  // ================================
+  // ==================================================
+  // 8. Serial Monitor
+  // ==================================================
 
   if (packet.sequence % 10 == 0) {
 
-    Serial.print("GX: ");
-    Serial.print(gx, 2);
+    Serial.print("ACC: ");
+    Serial.print(accelerationMovement, 3);
 
-    Serial.print(" | GY: ");
-    Serial.print(gy, 2);
+    Serial.print(" | ACC Norm: ");
+    Serial.print(accelerationNormalized, 2);
 
-    Serial.print(" | GZ: ");
-    Serial.print(gz, 2);
 
-    Serial.print(" | Gyro: ");
+    Serial.print(" | GYRO: ");
     Serial.print(gyroMagnitude, 2);
 
-    Serial.print(" deg/s");
+    Serial.print(" | GYRO Norm: ");
+    Serial.print(gyroNormalized, 2);
+
+
+    Serial.print(" | Combined: ");
+    Serial.print(combinedMovement, 2);
+
 
     Serial.print(" | Intensity: ");
     Serial.print(intensity);
+
 
     Serial.print(" | Send: ");
 
