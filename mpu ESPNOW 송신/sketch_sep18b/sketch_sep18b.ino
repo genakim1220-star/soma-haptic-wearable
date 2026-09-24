@@ -180,17 +180,36 @@ void loop() {
 
   packet.sequence++;
   packet.movement = movement;
-  packet.intensity = intensity;
+  packet.intensity = intensity; 
 
-  esp_err_t result = esp_now_send(
+  esp_err_t result = esp_now_send( 
     broadcastAddress,
     (uint8_t *)&packet,
     sizeof(packet)
   );
-
+   
   // 시리얼 출력량을 줄이기 위해 10회마다 출력
-  if (packet.sequence % 10 == 0) {
-    Serial.print("Movement: ");
+    if (packet.sequence % 10 == 0) {
+
+    Serial.print("AX: ");
+    Serial.print(x, 3);
+
+    Serial.print(" | AY: ");
+    Serial.print(y, 3);
+
+    Serial.print(" | AZ: ");
+    Serial.print(z, 3);
+
+    Serial.print(" | dX: ");
+    Serial.print(differenceX, 3);
+
+    Serial.print(" | dY: ");
+    Serial.print(differenceY, 3);
+
+    Serial.print(" | dZ: ");
+    Serial.print(differenceZ, 3);
+
+    Serial.print(" | Movement: ");
     Serial.print(movement, 3);
 
     Serial.print(" | Intensity: ");
