@@ -19,19 +19,28 @@ struct MotionPacket {
 
 MotionPacket packet;
 
-float previousX = 0;
-float previousY = 0;
-float previousZ = 0;
+
+// 자이로 이전 값
+float previousGX = 0;
+float previousGY = 0;
+float previousGZ = 0;
 
 bool firstReading = true;
 
-bool readAcceleration(
-  float &x,
-  float &y,
-  float &z
+
+// ================================
+// 자이로 읽기
+// ================================
+bool readGyroscope(
+  float &gx,
+  float &gy,
+  float &gz
 ) {
+
   Wire.beginTransmission(MPU_ADDRESS);
-  Wire.write(0x3B);
+
+  // 자이로 데이터 시작 레지스터
+  Wire.write(0x43);
 
   byte error = Wire.endTransmission(false);
 
@@ -49,32 +58,52 @@ bool readAcceleration(
     return false;
   }
 
-  int16_t rawX = (Wire.read() << 8) | Wire.read();
-  int16_t rawY = (Wire.read() << 8) | Wire.read();
-  int16_t rawZ = (Wire.read() << 8) | Wire.read();
+  int16_t rawGX =
+    (Wire.read() << 8) | Wire.read();
 
-  x = rawX / 16384.0;
-  y = rawY / 16384.0;
-  z = rawZ / 16384.0;
+  int16_t rawGY =
+    (Wire.read() << 8) | Wire.read();
+
+  int16_t rawGZ =
+    (Wire.read() << 8) | Wire.read();
+
+
+  // 기본 설정 ±250 °/s
+  // 감도 = 131 LSB / (°/s)
+
+  gx = rawGX / 131.0;
+  gy = rawGY / 131.0;
+  gz = rawGZ / 131.0;
 
   return true;
 }
 
+
 void setup() {
+
   Serial.begin(115200);
   delay(2000);
 
+
+  // ================================
   // MPU 통신 시작
+  // ================================
+
   Wire.begin(27, 26);
+
   Wire.setClock(100000);
   Wire.setTimeOut(100);
 
+
   // MPU 절전모드 해제
+
   Wire.beginTransmission(MPU_ADDRESS);
+
   Wire.write(0x6B);
   Wire.write(0x00);
 
   if (Wire.endTransmission() != 0) {
+
     Serial.println("MPU WAKE FAILED");
 
     while (true) {
@@ -84,19 +113,29 @@ void setup() {
 
   delay(100);
 
+
+  // ================================
   // ESP-NOW 준비
+  // ================================
+
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_channel(
+    1,
+    WIFI_SECOND_CHAN_NONE
+  );
+
 
   if (esp_now_init() != ESP_OK) {
+
     Serial.println("ESP-NOW INIT FAILED");
 
     while (true) {
       delay(1000);
     }
   }
+
 
   esp_now_peer_info_t peerInfo = {};
 
@@ -109,7 +148,12 @@ void setup() {
   peerInfo.channel = 1;
   peerInfo.encrypt = false;
 
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+
+  if (
+    esp_now_add_peer(&peerInfo)
+    != ESP_OK
+  ) {
+
     Serial.println("PEER ADD FAILED");
 
     while (true) {
@@ -117,110 +161,146 @@ void setup() {
     }
   }
 
+
   packet.sequence = 0;
 
-  Serial.println("SENDER READY");
+  Serial.println("GYRO SENDER READY");
 }
 
-void loop() {
-  float x;
-  float y;
-  float z;
 
-  if (!readAcceleration(x, y, z)) {
-    Serial.println("MPU READ FAILED");
+void loop() {
+
+  float gx;
+  float gy;
+  float gz;
+
+
+  // ================================
+  // 자이로 데이터 읽기
+  // ================================
+
+  if (!readGyroscope(gx, gy, gz)) {
+
+    Serial.println("GYRO READ FAILED");
+
     delay(100);
+
     return;
   }
 
+
+  // ================================
+  // 첫 번째 측정값 저장
+  // ================================
+
   if (firstReading) {
-    previousX = x;
-    previousY = y;
-    previousZ = z;
+
+    previousGX = gx;
+    previousGY = gy;
+    previousGZ = gz;
 
     firstReading = false;
 
     delay(50);
+
     return;
   }
 
-  // 직전 측정값과 현재 측정값의 차이
-  float differenceX = abs(x - previousX);
-  float differenceY = abs(y - previousY);
-  float differenceZ = abs(z - previousZ);
 
-  // 세 축의 변화량을 더해 움직임 세기로 사용
-  float movement =
-    differenceX +
-    differenceY +
-    differenceZ;
+  // ================================
+  // 현재 자이로 값의 크기 계산
+  // ================================
 
-  previousX = x;
-  previousY = y;
-  previousZ = z;
+  float gyroMagnitude =
+    sqrt(
+      gx * gx +
+      gy * gy +
+      gz * gz
+    );
 
-  // 작은 센서 흔들림은 무시
-  const float MIN_MOVEMENT = 0.03;
 
-  // 이 정도 이상의 변화는 최대 진동
-  const float MAX_MOVEMENT = 1.00;
+  // ================================
+  // 회전 속도 → 진동 세기
+  // ================================
+
+  const float MIN_GYRO = 5.0;
+  const float MAX_GYRO = 250.0;
 
   int intensity = 0;
 
-  if (movement > MIN_MOVEMENT) {
+
+  if (gyroMagnitude > MIN_GYRO) {
+
     float normalized =
-      (movement - MIN_MOVEMENT) /
-      (MAX_MOVEMENT - MIN_MOVEMENT);
+      (gyroMagnitude - MIN_GYRO) /
+      (MAX_GYRO - MIN_GYRO);
 
-    normalized = constrain(normalized, 0.0, 1.0);
+    normalized =
+      constrain(
+        normalized,
+        0.0,
+        1.0
+      );
 
-    // DRV2605 실시간 진동 범위: 0~127
-    intensity = normalized * 127;
+    intensity =
+      normalized * 127;
   }
 
+
+  // ================================
+  // ESP-NOW 전송
+  // ================================
+
   packet.sequence++;
-  packet.movement = movement;
-  packet.intensity = intensity; 
 
-  esp_err_t result = esp_now_send( 
-    broadcastAddress,
-    (uint8_t *)&packet,
-    sizeof(packet)
-  );
-   
-  // 시리얼 출력량을 줄이기 위해 10회마다 출력
-    if (packet.sequence % 10 == 0) {
+  packet.movement =
+    gyroMagnitude;
 
-    Serial.print("AX: ");
-    Serial.print(x, 3);
+  packet.intensity =
+    intensity;
 
-    Serial.print(" | AY: ");
-    Serial.print(y, 3);
 
-    Serial.print(" | AZ: ");
-    Serial.print(z, 3);
+  esp_err_t result =
+    esp_now_send(
+      broadcastAddress,
+      (uint8_t *)&packet,
+      sizeof(packet)
+    );
 
-    Serial.print(" | dX: ");
-    Serial.print(differenceX, 3);
 
-    Serial.print(" | dY: ");
-    Serial.print(differenceY, 3);
+  // ================================
+  // Serial Monitor
+  // ================================
 
-    Serial.print(" | dZ: ");
-    Serial.print(differenceZ, 3);
+  if (packet.sequence % 10 == 0) {
 
-    Serial.print(" | Movement: ");
-    Serial.print(movement, 3);
+    Serial.print("GX: ");
+    Serial.print(gx, 2);
+
+    Serial.print(" | GY: ");
+    Serial.print(gy, 2);
+
+    Serial.print(" | GZ: ");
+    Serial.print(gz, 2);
+
+    Serial.print(" | Gyro: ");
+    Serial.print(gyroMagnitude, 2);
+
+    Serial.print(" deg/s");
 
     Serial.print(" | Intensity: ");
     Serial.print(intensity);
 
     Serial.print(" | Send: ");
+
     Serial.println(
-      result == ESP_OK ? "OK" : "FAILED"
+      result == ESP_OK
+      ? "OK"
+      : "FAILED"
     );
   }
 
-  // 초당 약 20회 측정·전송
+
+  // 초당 약 20회 측정
   delay(50);
 }
