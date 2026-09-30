@@ -18,7 +18,7 @@ uint8_t broadcastAddress[] = {
 
 struct MotionPacket {
   uint32_t sequence;
-  float movement;
+  float movement; 
   uint8_t intensity;
 };
 
@@ -149,7 +149,7 @@ void setup() {
   // MPU 통신 시작
   // ================================
 
-  Wire.begin(27, 26);
+  Wire.begin(21, 22);
 
   Wire.setClock(100000);
   Wire.setTimeOut(100);

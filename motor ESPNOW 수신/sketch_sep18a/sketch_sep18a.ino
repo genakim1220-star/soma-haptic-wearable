@@ -37,7 +37,7 @@ void onDataReceived(
   memcpy(&packet, data, sizeof(packet));
 
   receivedIntensity = packet.intensity;
-  lastPacketTime = millis();
+  lastPacketTime = millis(); 
 }
 
 #else
@@ -67,7 +67,7 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   // DRV2605L I2C 시작
-  Wire.begin(27, 26);
+  Wire.begin(21, 22);
   Wire.setClock(100000);
 
   if (!drv.begin()) {
