@@ -3,31 +3,55 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-const uint8_t MPU_ADDRESS = 0x68;
+// =========================
+// MPU6050
+// =========================
 
-// ESP-NOW 브로드캐스트 주소
-uint8_t broadcastAddress[] = {
-  0xFF, 0xFF, 0xFF,
-  0xFF, 0xFF, 0xFF
+const int MPU_ADDR = 0x68;
+
+// =========================
+// SENSOR MODE
+// =========================
+
+enum SensorMode {
+  ACCELERATION,
+  GYRO,
+  ACCEL_GYRO
 };
 
+SensorMode sensorMode = ACCEL_GYRO;
 
-// ================================
-// 전송 데이터
-// ================================
+// =========================
+// DELAY MODE
+// =========================
 
-struct MotionPacket {
-  uint32_t sequence;
-  float movement; 
-  uint8_t intensity;
+enum DelayMode {
+  DELAY_0,
+  DELAY_3S,
+  DELAY_5S
 };
 
-MotionPacket packet;
+DelayMode delayMode = DELAY_0;
 
 
-// ================================
-// 가속도 이전 값
-// ================================
+// =========================
+// CALIBRATION
+// =========================
+
+float accelOffsetX = 0;
+float accelOffsetY = 0;
+float accelOffsetZ = 0;
+
+float gyroOffsetX = 0;
+float gyroOffsetY = 0;
+float gyroOffsetZ = 0;
+
+bool calibrated = false;
+
+
+// =========================
+// PREVIOUS SENSOR VALUES
+// =========================
 
 float previousX = 0;
 float previousY = 0;
@@ -36,151 +60,369 @@ float previousZ = 0;
 bool firstReading = true;
 
 
-// ================================
-// MPU-6050 가속도 + 자이로 읽기
-// ================================
+// =========================
+// ESP-NOW
+// =========================
 
-bool readMotion(
-  float &x,
-  float &y,
-  float &z,
+uint8_t broadcastAddress[] = {
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+
+// =========================
+// PACKET
+// =========================
+
+struct MotionPacket {
+
+  uint32_t sequence;
+
+  float movement;
+
+  uint8_t intensity;
+
+  uint8_t sensorMode;
+
+  uint16_t delayMs;
+};
+
+uint32_t sequenceNumber = 0;
+
+
+// =========================
+// MPU READ
+// =========================
+
+void readMPU(
+  float &ax,
+  float &ay,
+  float &az,
   float &gx,
   float &gy,
   float &gz
 ) {
 
-  // MPU 데이터 시작 주소
-  // 0x3B부터 시작하면
-  // ACC X/Y/Z + 온도 + GYRO X/Y/Z를
-  // 한 번에 읽을 수 있음
-
-  Wire.beginTransmission(MPU_ADDRESS);
+  Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
+  Wire.endTransmission(false);
 
-  byte error = Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 14, true);
 
-  if (error != 0) {
-    return false;
-  }
-
-
-  // 총 14바이트
-  // ACC 6
-  // TEMP 2
-  // GYRO 6
-
-  int received = Wire.requestFrom(
-    MPU_ADDRESS,
-    (uint8_t)14,
-    true
-  );
-
-  if (received != 14) {
-    return false;
-  }
-
-
-  // ================================
-  // 가속도 RAW 값
-  // ================================
-
-  int16_t rawX =
-    (Wire.read() << 8) | Wire.read();
-
-  int16_t rawY =
-    (Wire.read() << 8) | Wire.read();
-
-  int16_t rawZ =
-    (Wire.read() << 8) | Wire.read();
-
-
-  // ================================
-  // 온도 데이터
-  // 사용하지 않음
-  // ================================
+  int16_t rawAX = Wire.read() << 8 | Wire.read();
+  int16_t rawAY = Wire.read() << 8 | Wire.read();
+  int16_t rawAZ = Wire.read() << 8 | Wire.read();
 
   Wire.read();
   Wire.read();
 
+  int16_t rawGX = Wire.read() << 8 | Wire.read();
+  int16_t rawGY = Wire.read() << 8 | Wire.read();
+  int16_t rawGZ = Wire.read() << 8 | Wire.read();
 
-  // ================================
-  // 자이로 RAW 값
-  // ================================
+  // ±2g
+  ax = rawAX / 16384.0;
+  ay = rawAY / 16384.0;
+  az = rawAZ / 16384.0;
 
-  int16_t rawGX =
-    (Wire.read() << 8) | Wire.read();
-
-  int16_t rawGY =
-    (Wire.read() << 8) | Wire.read();
-
-  int16_t rawGZ =
-    (Wire.read() << 8) | Wire.read();
-
-
-  // ================================
-  // 실제 단위로 변환
-  // ================================
-
-  // 가속도
-  // 기본 설정 ±2g
-  x = rawX / 16384.0;
-  y = rawY / 16384.0;
-  z = rawZ / 16384.0;
-
-
-  // 자이로
-  // 기본 설정 ±250 °/s
+  // ±250 deg/s
   gx = rawGX / 131.0;
   gy = rawGY / 131.0;
   gz = rawGZ / 131.0;
-
-
-  return true;
 }
 
+
+// =========================
+// DELAY VALUE
+// =========================
+
+uint16_t getDelayMs() {
+
+  if (delayMode == DELAY_0)
+    return 0;
+
+  if (delayMode == DELAY_3S)
+    return 3000;
+
+  if (delayMode == DELAY_5S)
+    return 5000;
+
+  return 0;
+}
+
+
+// =========================
+// CALIBRATION
+// =========================
+
+void calibrateSensor() {
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("CALIBRATION START");
+  Serial.println("Keep the sensor completely still.");
+  Serial.println("================================");
+
+  const int samples = 100;
+
+  float sumAX = 0;
+  float sumAY = 0;
+  float sumAZ = 0;
+
+  float sumGX = 0;
+  float sumGY = 0;
+  float sumGZ = 0;
+
+  for (int i = 0; i < samples; i++) {
+
+    float ax, ay, az;
+    float gx, gy, gz;
+
+    readMPU(ax, ay, az, gx, gy, gz);
+
+    sumAX += ax;
+    sumAY += ay;
+    sumAZ += az;
+
+    sumGX += gx;
+    sumGY += gy;
+    sumGZ += gz;
+
+    delay(20);
+  }
+
+  accelOffsetX = sumAX / samples;
+  accelOffsetY = sumAY / samples;
+  accelOffsetZ = sumAZ / samples;
+
+  gyroOffsetX = sumGX / samples;
+  gyroOffsetY = sumGY / samples;
+  gyroOffsetZ = sumGZ / samples;
+
+  calibrated = true;
+
+  firstReading = true;
+
+  Serial.println();
+  Serial.println("CALIBRATION COMPLETE");
+
+  Serial.print("Accel offset X: ");
+  Serial.println(accelOffsetX);
+
+  Serial.print("Accel offset Y: ");
+  Serial.println(accelOffsetY);
+
+  Serial.print("Accel offset Z: ");
+  Serial.println(accelOffsetZ);
+
+  Serial.print("Gyro offset X: ");
+  Serial.println(gyroOffsetX);
+
+  Serial.print("Gyro offset Y: ");
+  Serial.println(gyroOffsetY);
+
+  Serial.print("Gyro offset Z: ");
+  Serial.println(gyroOffsetZ);
+
+  Serial.println();
+}
+
+
+// =========================
+// SERIAL COMMAND
+// =========================
+
+void printStatus() {
+
+  Serial.println();
+  Serial.println("========== STATUS ==========");
+
+  Serial.print("Sensor Mode: ");
+
+  if (sensorMode == ACCELERATION)
+    Serial.println("ACCELERATION");
+
+  else if (sensorMode == GYRO)
+    Serial.println("GYRO");
+
+  else
+    Serial.println("ACC + GYRO");
+
+
+  Serial.print("Delay: ");
+
+  if (delayMode == DELAY_0)
+    Serial.println("0 sec");
+
+  else if (delayMode == DELAY_3S)
+    Serial.println("3 sec");
+
+  else
+    Serial.println("5 sec");
+
+
+  Serial.print("Calibration: ");
+
+  if (calibrated)
+    Serial.println("YES");
+
+  else
+    Serial.println("NO");
+
+  Serial.println("============================");
+  Serial.println();
+}
+
+
+void printHelp() {
+
+  Serial.println();
+  Serial.println("========== COMMANDS ==========");
+
+  Serial.println("ACC        -> Acceleration only");
+  Serial.println("GYRO       -> Gyro only");
+  Serial.println("MIX        -> Acceleration + Gyro");
+
+  Serial.println("DELAY 0    -> Immediate");
+  Serial.println("DELAY 3    -> 3 second delay");
+  Serial.println("DELAY 5    -> 5 second delay");
+
+  Serial.println("CAL        -> Sensor calibration");
+  Serial.println("STATUS     -> Current settings");
+  Serial.println("HELP       -> Show commands");
+
+  Serial.println("==============================");
+  Serial.println();
+}
+
+
+void handleSerialCommand() {
+
+  if (!Serial.available())
+    return;
+
+  String command = Serial.readStringUntil('\n');
+
+  command.trim();
+  command.toUpperCase();
+
+
+  // -------------------------
+  // SENSOR
+  // -------------------------
+
+  if (command == "ACC") {
+
+    sensorMode = ACCELERATION;
+
+    Serial.println("Sensor Mode → ACCELERATION");
+  }
+
+
+  else if (command == "GYRO") {
+
+    sensorMode = GYRO;
+
+    Serial.println("Sensor Mode → GYRO");
+  }
+
+
+  else if (command == "MIX") {
+
+    sensorMode = ACCEL_GYRO;
+
+    Serial.println("Sensor Mode → ACC + GYRO");
+  }
+
+
+  // -------------------------
+  // DELAY
+  // -------------------------
+
+  else if (command == "DELAY 0") {
+
+    delayMode = DELAY_0;
+
+    Serial.println("Delay → 0 sec");
+  }
+
+
+  else if (command == "DELAY 3") {
+
+    delayMode = DELAY_3S;
+
+    Serial.println("Delay → 3 sec");
+  }
+
+
+  else if (command == "DELAY 5") {
+
+    delayMode = DELAY_5S;
+
+    Serial.println("Delay → 5 sec");
+  }
+
+
+  // -------------------------
+  // CALIBRATION
+  // -------------------------
+
+  else if (command == "CAL") {
+
+    calibrateSensor();
+  }
+
+
+  // -------------------------
+  // STATUS
+  // -------------------------
+
+  else if (command == "STATUS") {
+
+    printStatus();
+  }
+
+
+  // -------------------------
+  // HELP
+  // -------------------------
+
+  else if (command == "HELP") {
+
+    printHelp();
+  }
+
+
+  else {
+
+    Serial.println("Unknown command.");
+    Serial.println("Type HELP");
+  }
+}
+
+
+// =========================
+// SETUP
+// =========================
 
 void setup() {
 
   Serial.begin(115200);
-  delay(2000);
-
-
-  // ================================
-  // MPU 통신 시작
-  // ================================
 
   Wire.begin(21, 22);
 
-  Wire.setClock(100000);
-  Wire.setTimeOut(100);
-
-
-  // ================================
-  // MPU 절전모드 해제
-  // ================================
-
-  Wire.beginTransmission(MPU_ADDRESS);
-
+  // MPU6050 wake up
+  Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B);
-  Wire.write(0x00);
-
-  if (Wire.endTransmission() != 0) {
-
-    Serial.println("MPU WAKE FAILED");
-
-    while (true) {
-      delay(1000);
-    }
-  }
-
-  delay(100);
+  Wire.write(0);
+  Wire.endTransmission(true);
 
 
-  // ================================
-  // ESP-NOW 준비
-  // ================================
+  // -------------------------
+  // WiFi / ESP-NOW
+  // -------------------------
 
   WiFi.mode(WIFI_STA);
+
   WiFi.disconnect();
 
   esp_wifi_set_channel(
@@ -193,9 +435,7 @@ void setup() {
 
     Serial.println("ESP-NOW INIT FAILED");
 
-    while (true) {
-      delay(1000);
-    }
+    return;
   }
 
 
@@ -208,6 +448,7 @@ void setup() {
   );
 
   peerInfo.channel = 1;
+
   peerInfo.encrypt = false;
 
 
@@ -216,177 +457,160 @@ void setup() {
     != ESP_OK
   ) {
 
-    Serial.println("PEER ADD FAILED");
+    Serial.println("FAILED TO ADD PEER");
 
-    while (true) {
-      delay(1000);
-    }
+    return;
   }
 
 
-  packet.sequence = 0;
+  Serial.println();
+  Serial.println("================================");
+  Serial.println(" SOMA HAPTIC SYSTEM");
+  Serial.println("================================");
 
-  Serial.println("ACC + GYRO SENDER READY");
+  printHelp();
+
+  printStatus();
 }
 
 
+// =========================
+// LOOP
+// =========================
+
 void loop() {
 
-  float x;
-  float y;
-  float z;
-
-  float gx;
-  float gy;
-  float gz;
+  handleSerialCommand();
 
 
-  // ================================
-  // 가속도 + 자이로 읽기
-  // ================================
+  float ax, ay, az;
+  float gx, gy, gz;
 
-  if (
-    !readMotion(
-      x,
-      y,
-      z,
-      gx,
-      gy,
-      gz
-    )
-  ) {
-
-    Serial.println("MPU READ FAILED");
-
-    delay(100);
-
-    return;
-  }
+  readMPU(
+    ax, ay, az,
+    gx, gy, gz
+  );
 
 
-  // ================================
-  // 첫 번째 측정값 저장
-  // ================================
+  // =========================
+  // CALIBRATION OFFSET
+  // =========================
 
-  if (firstReading) {
+  float correctedAX = ax - accelOffsetX;
+  float correctedAY = ay - accelOffsetY;
+  float correctedAZ = az - accelOffsetZ;
 
-    previousX = x;
-    previousY = y;
-    previousZ = z;
-
-    firstReading = false;
-
-    delay(50);
-
-    return;
-  }
+  float correctedGX = gx - gyroOffsetX;
+  float correctedGY = gy - gyroOffsetY;
+  float correctedGZ = gz - gyroOffsetZ;
 
 
-  // ==================================================
-  // 1. 가속도 변화량 계산
-  // ==================================================
+  // =========================
+  // ACCELERATION MOVEMENT
+  // =========================
 
   float differenceX =
-    abs(x - previousX);
+    abs(correctedAX - previousX);
 
   float differenceY =
-    abs(y - previousY);
+    abs(correctedAY - previousY);
 
   float differenceZ =
-    abs(z - previousZ);
+    abs(correctedAZ - previousZ);
 
 
-  // 기존 코드와 동일한 방식
   float accelerationMovement =
     differenceX +
     differenceY +
     differenceZ;
 
 
-  previousX = x;
-  previousY = y;
-  previousZ = z;
-
-
-  // ==================================================
-  // 2. 자이로 회전 속도 계산
-  // ==================================================
+  // =========================
+  // GYRO MOVEMENT
+  // =========================
 
   float gyroMagnitude =
     sqrt(
-      gx * gx +
-      gy * gy +
-      gz * gz
+      correctedGX * correctedGX +
+      correctedGY * correctedGY +
+      correctedGZ * correctedGZ
     );
 
 
-  // ==================================================
-  // 3. 가속도 정규화
-  // ==================================================
+  // =========================
+  // NORMALIZATION
+  // =========================
 
   const float MIN_ACCEL = 0.03;
   const float MAX_ACCEL = 1.00;
 
-  float accelerationNormalized = 0;
+  float accelerationNormalized =
+    (accelerationMovement - MIN_ACCEL)
+    /
+    (MAX_ACCEL - MIN_ACCEL);
 
+  accelerationNormalized =
+    constrain(
+      accelerationNormalized,
+      0.0,
+      1.0
+    );
 
-  if (accelerationMovement > MIN_ACCEL) {
-
-    accelerationNormalized =
-      (accelerationMovement - MIN_ACCEL) /
-      (MAX_ACCEL - MIN_ACCEL);
-
-    accelerationNormalized =
-      constrain(
-        accelerationNormalized,
-        0.0,
-        1.0
-      );
-  }
-
-
-  // ==================================================
-  // 4. 자이로 정규화
-  // ==================================================
 
   const float MIN_GYRO = 5.0;
   const float MAX_GYRO = 250.0;
 
-  float gyroNormalized = 0;
+  float gyroNormalized =
+    (gyroMagnitude - MIN_GYRO)
+    /
+    (MAX_GYRO - MIN_GYRO);
+
+  gyroNormalized =
+    constrain(
+      gyroNormalized,
+      0.0,
+      1.0
+    );
 
 
-  if (gyroMagnitude > MIN_GYRO) {
+  // =========================
+  // SENSOR MODE SELECTION
+  // =========================
 
-    gyroNormalized =
-      (gyroMagnitude - MIN_GYRO) /
-      (MAX_GYRO - MIN_GYRO);
+  float movement = 0;
 
-    gyroNormalized =
-      constrain(
-        gyroNormalized,
-        0.0,
-        1.0
+
+  if (sensorMode == ACCELERATION) {
+
+    movement =
+      accelerationNormalized;
+  }
+
+
+  else if (sensorMode == GYRO) {
+
+    movement =
+      gyroNormalized;
+  }
+
+
+  else if (sensorMode == ACCEL_GYRO) {
+
+    movement =
+      (
+        accelerationNormalized * 0.5
+        +
+        gyroNormalized * 0.5
       );
   }
 
 
-  // ==================================================
-  // 5. 가속도 + 자이로 결합
-  // ==================================================
-
-  // 현재는 50 : 50
-  float combinedMovement =
-    (accelerationNormalized * 0.5) +
-    (gyroNormalized * 0.5);
-
-
-  // ==================================================
-  // 6. 진동 세기로 변환
-  // ==================================================
+  // =========================
+  // INTENSITY
+  // =========================
 
   int intensity =
-    combinedMovement * 127;
-
+    movement * 127;
 
   intensity =
     constrain(
@@ -396,65 +620,59 @@ void loop() {
     );
 
 
-  // ==================================================
-  // 7. ESP-NOW 전송
-  // ==================================================
+  // =========================
+  // PACKET
+  // =========================
 
-  packet.sequence++;
+  MotionPacket packet;
+
+  packet.sequence =
+    sequenceNumber++;
 
   packet.movement =
-    combinedMovement;
+    movement;
 
   packet.intensity =
     intensity;
 
+  packet.sensorMode =
+    sensorMode;
 
-  esp_err_t result =
-    esp_now_send(
-      broadcastAddress,
-      (uint8_t *)&packet,
-      sizeof(packet)
-    );
+  packet.delayMs =
+    getDelayMs();
 
 
-  // ==================================================
-  // 8. Serial Monitor
-  // ==================================================
-
-  if (packet.sequence % 10 == 0) {
-
-    Serial.print("ACC: ");
-    Serial.print(accelerationMovement, 3);
-
-    Serial.print(" | ACC Norm: ");
-    Serial.print(accelerationNormalized, 2);
+  esp_now_send(
+    broadcastAddress,
+    (uint8_t *)&packet,
+    sizeof(packet)
+  );
 
 
-    Serial.print(" | GYRO: ");
-    Serial.print(gyroMagnitude, 2);
+  // =========================
+  // SERIAL MONITOR
+  // =========================
 
-    Serial.print(" | GYRO Norm: ");
-    Serial.print(gyroNormalized, 2);
+  Serial.print("Movement: ");
+  Serial.print(movement, 3);
 
+  Serial.print(" | Intensity: ");
+  Serial.print(intensity);
 
-    Serial.print(" | Combined: ");
-    Serial.print(combinedMovement, 2);
+  Serial.print(" | Delay: ");
+  Serial.print(getDelayMs());
 
-
-    Serial.print(" | Intensity: ");
-    Serial.print(intensity);
-
-
-    Serial.print(" | Send: ");
-
-    Serial.println(
-      result == ESP_OK
-      ? "OK"
-      : "FAILED"
-    );
-  }
+  Serial.println(" ms");
 
 
-  // 초당 약 20회 측정
+  // =========================
+  // SAVE PREVIOUS
+  // =========================
+
+  previousX = correctedAX;
+  previousY = correctedAY;
+  previousZ = correctedAZ;
+
+
   delay(50);
 }
