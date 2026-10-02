@@ -9,6 +9,7 @@
 
 const int MPU_ADDR = 0x68;
 
+ 
 // =========================
 // SENSOR MODE
 // =========================
@@ -20,6 +21,7 @@ enum SensorMode {
 };
 
 SensorMode sensorMode = ACCEL_GYRO;
+
 
 // =========================
 // DELAY MODE
@@ -65,7 +67,12 @@ bool firstReading = true;
 // =========================
 
 uint8_t broadcastAddress[] = {
-  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF
 };
 
 
@@ -103,28 +110,52 @@ void readMPU(
 ) {
 
   Wire.beginTransmission(MPU_ADDR);
+
   Wire.write(0x3B);
+
   Wire.endTransmission(false);
 
-  Wire.requestFrom(MPU_ADDR, 14, true);
+  Wire.requestFrom(
+    MPU_ADDR,
+    14,
+    true
+  );
 
-  int16_t rawAX = Wire.read() << 8 | Wire.read();
-  int16_t rawAY = Wire.read() << 8 | Wire.read();
-  int16_t rawAZ = Wire.read() << 8 | Wire.read();
 
+  int16_t rawAX =
+    Wire.read() << 8 | Wire.read();
+
+  int16_t rawAY =
+    Wire.read() << 8 | Wire.read();
+
+  int16_t rawAZ =
+    Wire.read() << 8 | Wire.read();
+
+
+  // Temperature
   Wire.read();
   Wire.read();
 
-  int16_t rawGX = Wire.read() << 8 | Wire.read();
-  int16_t rawGY = Wire.read() << 8 | Wire.read();
-  int16_t rawGZ = Wire.read() << 8 | Wire.read();
+
+  int16_t rawGX =
+    Wire.read() << 8 | Wire.read();
+
+  int16_t rawGY =
+    Wire.read() << 8 | Wire.read();
+
+  int16_t rawGZ =
+    Wire.read() << 8 | Wire.read();
+
 
   // ±2g
+
   ax = rawAX / 16384.0;
   ay = rawAY / 16384.0;
   az = rawAZ / 16384.0;
 
+
   // ±250 deg/s
+
   gx = rawGX / 131.0;
   gy = rawGY / 131.0;
   gz = rawGZ / 131.0;
@@ -162,7 +193,9 @@ void calibrateSensor() {
   Serial.println("Keep the sensor completely still.");
   Serial.println("================================");
 
+
   const int samples = 100;
+
 
   float sumAX = 0;
   float sumAY = 0;
@@ -172,12 +205,18 @@ void calibrateSensor() {
   float sumGY = 0;
   float sumGZ = 0;
 
+
   for (int i = 0; i < samples; i++) {
 
     float ax, ay, az;
     float gx, gy, gz;
 
-    readMPU(ax, ay, az, gx, gy, gz);
+
+    readMPU(
+      ax, ay, az,
+      gx, gy, gz
+    );
+
 
     sumAX += ax;
     sumAY += ay;
@@ -187,20 +226,40 @@ void calibrateSensor() {
     sumGY += gy;
     sumGZ += gz;
 
+
     delay(20);
   }
 
-  accelOffsetX = sumAX / samples;
-  accelOffsetY = sumAY / samples;
-  accelOffsetZ = sumAZ / samples;
 
-  gyroOffsetX = sumGX / samples;
-  gyroOffsetY = sumGY / samples;
-  gyroOffsetZ = sumGZ / samples;
+  accelOffsetX =
+    sumAX / samples;
+
+  accelOffsetY =
+    sumAY / samples;
+
+  accelOffsetZ =
+    sumAZ / samples;
+
+
+  gyroOffsetX =
+    sumGX / samples;
+
+  gyroOffsetY =
+    sumGY / samples;
+
+  gyroOffsetZ =
+    sumGZ / samples;
+
 
   calibrated = true;
 
+
+  // 중요:
+  // calibration 이후에는
+  // 다음 센서값을 기준값으로 다시 잡는다.
+
   firstReading = true;
+
 
   Serial.println();
   Serial.println("CALIBRATION COMPLETE");
@@ -228,13 +287,14 @@ void calibrateSensor() {
 
 
 // =========================
-// SERIAL COMMAND
+// STATUS
 // =========================
 
 void printStatus() {
 
   Serial.println();
   Serial.println("========== STATUS ==========");
+
 
   Serial.print("Sensor Mode: ");
 
@@ -268,10 +328,15 @@ void printStatus() {
   else
     Serial.println("NO");
 
+
   Serial.println("============================");
   Serial.println();
 }
 
+
+// =========================
+// HELP
+// =========================
 
 void printHelp() {
 
@@ -295,76 +360,109 @@ void printHelp() {
 }
 
 
+// =========================
+// SERIAL COMMAND
+// =========================
+
 void handleSerialCommand() {
 
   if (!Serial.available())
     return;
 
-  String command = Serial.readStringUntil('\n');
+
+  String command =
+    Serial.readStringUntil('\n');
 
   command.trim();
   command.toUpperCase();
 
 
-  // -------------------------
-  // SENSOR
-  // -------------------------
+  // =========================
+  // SENSOR MODE
+  // =========================
 
   if (command == "ACC") {
 
-    sensorMode = ACCELERATION;
+    sensorMode =
+      ACCELERATION;
 
-    Serial.println("Sensor Mode → ACCELERATION");
+    // 모드 변경 후
+    // 다음 센서값부터 새 기준으로 계산
+
+    firstReading = true;
+
+    Serial.println(
+      "Sensor Mode -> ACCELERATION"
+    );
   }
 
 
   else if (command == "GYRO") {
 
-    sensorMode = GYRO;
+    sensorMode =
+      GYRO;
 
-    Serial.println("Sensor Mode → GYRO");
+    firstReading = true;
+
+    Serial.println(
+      "Sensor Mode -> GYRO"
+    );
   }
 
 
   else if (command == "MIX") {
 
-    sensorMode = ACCEL_GYRO;
+    sensorMode =
+      ACCEL_GYRO;
 
-    Serial.println("Sensor Mode → ACC + GYRO");
+    firstReading = true;
+
+    Serial.println(
+      "Sensor Mode -> ACC + GYRO"
+    );
   }
 
 
-  // -------------------------
+  // =========================
   // DELAY
-  // -------------------------
+  // =========================
 
   else if (command == "DELAY 0") {
 
-    delayMode = DELAY_0;
+    delayMode =
+      DELAY_0;
 
-    Serial.println("Delay → 0 sec");
+    Serial.println(
+      "Delay -> 0 sec"
+    );
   }
 
 
   else if (command == "DELAY 3") {
 
-    delayMode = DELAY_3S;
+    delayMode =
+      DELAY_3S;
 
-    Serial.println("Delay → 3 sec");
+    Serial.println(
+      "Delay -> 3 sec"
+    );
   }
 
 
   else if (command == "DELAY 5") {
 
-    delayMode = DELAY_5S;
+    delayMode =
+      DELAY_5S;
 
-    Serial.println("Delay → 5 sec");
+    Serial.println(
+      "Delay -> 5 sec"
+    );
   }
 
 
-  // -------------------------
+  // =========================
   // CALIBRATION
-  // -------------------------
+  // =========================
 
   else if (command == "CAL") {
 
@@ -372,9 +470,9 @@ void handleSerialCommand() {
   }
 
 
-  // -------------------------
+  // =========================
   // STATUS
-  // -------------------------
+  // =========================
 
   else if (command == "STATUS") {
 
@@ -382,9 +480,9 @@ void handleSerialCommand() {
   }
 
 
-  // -------------------------
+  // =========================
   // HELP
-  // -------------------------
+  // =========================
 
   else if (command == "HELP") {
 
@@ -394,8 +492,13 @@ void handleSerialCommand() {
 
   else {
 
-    Serial.println("Unknown command.");
-    Serial.println("Type HELP");
+    Serial.println(
+      "Unknown command."
+    );
+
+    Serial.println(
+      "Type HELP"
+    );
   }
 }
 
@@ -408,22 +511,43 @@ void setup() {
 
   Serial.begin(115200);
 
+  delay(1000);
+
+
+  // =========================
+  // I2C
+  // =========================
+
   Wire.begin(21, 22);
 
-  // MPU6050 wake up
-  Wire.beginTransmission(MPU_ADDR);
+  Wire.setClock(100000);
+
+
+  // =========================
+  // MPU6050 WAKE UP
+  // =========================
+
+  Wire.beginTransmission(
+    MPU_ADDR
+  );
+
   Wire.write(0x6B);
-  Wire.write(0);
+  Wire.write(0x00);
+
   Wire.endTransmission(true);
 
 
-  // -------------------------
-  // WiFi / ESP-NOW
-  // -------------------------
+  delay(100);
+
+
+  // =========================
+  // WIFI
+  // =========================
 
   WiFi.mode(WIFI_STA);
 
   WiFi.disconnect();
+
 
   esp_wifi_set_channel(
     1,
@@ -431,9 +555,18 @@ void setup() {
   );
 
 
-  if (esp_now_init() != ESP_OK) {
+  // =========================
+  // ESP-NOW
+  // =========================
 
-    Serial.println("ESP-NOW INIT FAILED");
+  if (
+    esp_now_init()
+    != ESP_OK
+  ) {
+
+    Serial.println(
+      "ESP-NOW INIT FAILED"
+    );
 
     return;
   }
@@ -441,11 +574,13 @@ void setup() {
 
   esp_now_peer_info_t peerInfo = {};
 
+
   memcpy(
     peerInfo.peer_addr,
     broadcastAddress,
     6
   );
+
 
   peerInfo.channel = 1;
 
@@ -453,20 +588,29 @@ void setup() {
 
 
   if (
-    esp_now_add_peer(&peerInfo)
+    esp_now_add_peer(
+      &peerInfo
+    )
     != ESP_OK
   ) {
 
-    Serial.println("FAILED TO ADD PEER");
+    Serial.println(
+      "FAILED TO ADD PEER"
+    );
 
     return;
   }
 
 
+  // =========================
+  // START
+  // =========================
+
   Serial.println();
   Serial.println("================================");
   Serial.println(" SOMA HAPTIC SYSTEM");
   Serial.println("================================");
+
 
   printHelp();
 
@@ -480,11 +624,20 @@ void setup() {
 
 void loop() {
 
+  // =========================
+  // SERIAL COMMAND
+  // =========================
+
   handleSerialCommand();
 
 
+  // =========================
+  // READ MPU
+  // =========================
+
   float ax, ay, az;
   float gx, gy, gz;
+
 
   readMPU(
     ax, ay, az,
@@ -496,121 +649,255 @@ void loop() {
   // CALIBRATION OFFSET
   // =========================
 
-  float correctedAX = ax - accelOffsetX;
-  float correctedAY = ay - accelOffsetY;
-  float correctedAZ = az - accelOffsetZ;
+  float correctedAX =
+    ax - accelOffsetX;
 
-  float correctedGX = gx - gyroOffsetX;
-  float correctedGY = gy - gyroOffsetY;
-  float correctedGZ = gz - gyroOffsetZ;
+  float correctedAY =
+    ay - accelOffsetY;
+
+  float correctedAZ =
+    az - accelOffsetZ;
 
 
-  // =========================
-  // ACCELERATION MOVEMENT
-  // =========================
+  float correctedGX =
+    gx - gyroOffsetX;
+
+  float correctedGY =
+    gy - gyroOffsetY;
+
+  float correctedGZ =
+    gz - gyroOffsetZ;
+
+
+  // ==================================================
+  // 첫 번째 측정값
+  // ==================================================
+
+  // 이것이 예전 ACC 코드와 맞추기 위한
+  // 중요한 부분.
+
+  if (firstReading) {
+
+    previousX =
+      correctedAX;
+
+    previousY =
+      correctedAY;
+
+    previousZ =
+      correctedAZ;
+
+    firstReading = false;
+
+    delay(50);
+
+    return;
+  }
+
+
+  // ==================================================
+  // ACCELERATION
+  // ==================================================
 
   float differenceX =
-    abs(correctedAX - previousX);
+    abs(
+      correctedAX
+      - previousX
+    );
+
 
   float differenceY =
-    abs(correctedAY - previousY);
+    abs(
+      correctedAY
+      - previousY
+    );
+
 
   float differenceZ =
-    abs(correctedAZ - previousZ);
+    abs(
+      correctedAZ
+      - previousZ
+    );
 
+
+  // 예전 코드와 동일한 방식
+  //
+  // 현재값 - 이전값
+  // ↓
+  // 각 축 변화량
+  // ↓
+  // 세 축을 더함
 
   float accelerationMovement =
-    differenceX +
-    differenceY +
-    differenceZ;
+    differenceX
+    + differenceY
+    + differenceZ;
 
 
-  // =========================
-  // GYRO MOVEMENT
-  // =========================
+  // ==================================================
+  // GYRO
+  // ==================================================
 
   float gyroMagnitude =
     sqrt(
-      correctedGX * correctedGX +
-      correctedGY * correctedGY +
+      correctedGX * correctedGX
+      +
+      correctedGY * correctedGY
+      +
       correctedGZ * correctedGZ
     );
 
 
-  // =========================
-  // NORMALIZATION
-  // =========================
+  // ==================================================
+  // ACC NORMALIZATION
+  // ==================================================
 
-  const float MIN_ACCEL = 0.03;
-  const float MAX_ACCEL = 1.00;
+  const float MIN_ACCEL =
+    0.03;
+
+  const float MAX_ACCEL =
+    1.00;
+
 
   float accelerationNormalized =
-    (accelerationMovement - MIN_ACCEL)
-    /
-    (MAX_ACCEL - MIN_ACCEL);
-
-  accelerationNormalized =
-    constrain(
-      accelerationNormalized,
-      0.0,
-      1.0
-    );
+    0;
 
 
-  const float MIN_GYRO = 5.0;
-  const float MAX_GYRO = 250.0;
+  if (
+    accelerationMovement
+    > MIN_ACCEL
+  ) {
+
+    accelerationNormalized =
+      (
+        accelerationMovement
+        - MIN_ACCEL
+      )
+      /
+      (
+        MAX_ACCEL
+        - MIN_ACCEL
+      );
+
+
+    accelerationNormalized =
+      constrain(
+        accelerationNormalized,
+        0.0,
+        1.0
+      );
+  }
+
+
+  // ==================================================
+  // GYRO NORMALIZATION
+  // ==================================================
+
+  const float MIN_GYRO =
+    5.0;
+
+  const float MAX_GYRO =
+    250.0;
+
 
   float gyroNormalized =
-    (gyroMagnitude - MIN_GYRO)
-    /
-    (MAX_GYRO - MIN_GYRO);
-
-  gyroNormalized =
-    constrain(
-      gyroNormalized,
-      0.0,
-      1.0
-    );
+    0;
 
 
-  // =========================
-  // SENSOR MODE SELECTION
-  // =========================
+  if (
+    gyroMagnitude
+    > MIN_GYRO
+  ) {
+
+    gyroNormalized =
+      (
+        gyroMagnitude
+        - MIN_GYRO
+      )
+      /
+      (
+        MAX_GYRO
+        - MIN_GYRO
+      );
+
+
+    gyroNormalized =
+      constrain(
+        gyroNormalized,
+        0.0,
+        1.0
+      );
+  }
+
+
+  // ==================================================
+  // SENSOR MODE
+  // ==================================================
 
   float movement = 0;
 
 
-  if (sensorMode == ACCELERATION) {
+  // -------------------------
+  // ACC
+  // -------------------------
+
+  if (
+    sensorMode
+    == ACCELERATION
+  ) {
+
+    // ACC는 smoothing 없음.
+    // 순간적인 변화량을
+    // 그대로 사용한다.
 
     movement =
       accelerationNormalized;
   }
 
 
-  else if (sensorMode == GYRO) {
+  // -------------------------
+  // GYRO
+  // -------------------------
+
+  else if (
+    sensorMode
+    == GYRO
+  ) {
 
     movement =
       gyroNormalized;
   }
 
 
-  else if (sensorMode == ACCEL_GYRO) {
+  // -------------------------
+  // MIX
+  // -------------------------
+
+  else if (
+    sensorMode
+    == ACCEL_GYRO
+  ) {
 
     movement =
       (
-        accelerationNormalized * 0.5
-        +
-        gyroNormalized * 0.5
+        accelerationNormalized
+        * 0.5
+      )
+      +
+      (
+        gyroNormalized
+        * 0.5
       );
   }
 
 
-  // =========================
+  // ==================================================
   // INTENSITY
-  // =========================
+  // ==================================================
 
   int intensity =
     movement * 127;
+
 
   intensity =
     constrain(
@@ -620,27 +907,36 @@ void loop() {
     );
 
 
-  // =========================
+  // ==================================================
   // PACKET
-  // =========================
+  // ==================================================
 
   MotionPacket packet;
+
 
   packet.sequence =
     sequenceNumber++;
 
+
   packet.movement =
     movement;
+
 
   packet.intensity =
     intensity;
 
+
   packet.sensorMode =
     sensorMode;
+
 
   packet.delayMs =
     getDelayMs();
 
+
+  // ==================================================
+  // ESP-NOW SEND
+  // ==================================================
 
   esp_now_send(
     broadcastAddress,
@@ -649,30 +945,137 @@ void loop() {
   );
 
 
-  // =========================
+  // ==================================================
+  // PREVIOUS VALUE
+  // ==================================================
+
+  previousX =
+    correctedAX;
+
+  previousY =
+    correctedAY;
+
+  previousZ =
+    correctedAZ;
+
+
+  // ==================================================
   // SERIAL MONITOR
+  // ==================================================
+
+  // 매번 출력하지 않고
+  // 500ms마다 한 번만 출력
+
+  static uint32_t lastPrint =
+    0;
+
+
+  if (
+    millis() - lastPrint
+    >= 500
+  ) {
+
+    lastPrint =
+      millis();
+
+
+    Serial.print(
+      "Mode: "
+    );
+
+
+    if (
+      sensorMode
+      == ACCELERATION
+    )
+      Serial.print("ACC");
+
+    else if (
+      sensorMode
+      == GYRO
+    )
+      Serial.print("GYRO");
+
+    else
+      Serial.print("MIX");
+
+
+    Serial.print(
+      " | ACC: "
+    );
+
+    Serial.print(
+      accelerationMovement,
+      3
+    );
+
+
+    Serial.print(
+      " | ACC Norm: "
+    );
+
+    Serial.print(
+      accelerationNormalized,
+      2
+    );
+
+
+    Serial.print(
+      " | GYRO: "
+    );
+
+    Serial.print(
+      gyroMagnitude,
+      2
+    );
+
+
+    Serial.print(
+      " | GYRO Norm: "
+    );
+
+    Serial.print(
+      gyroNormalized,
+      2
+    );
+
+
+    Serial.print(
+      " | Movement: "
+    );
+
+    Serial.print(
+      movement,
+      2
+    );
+
+
+    Serial.print(
+      " | Intensity: "
+    );
+
+    Serial.print(
+      intensity
+    );
+
+
+    Serial.print(
+      " | Delay: "
+    );
+
+    Serial.print(
+      getDelayMs()
+    );
+
+    Serial.println(
+      " ms"
+    ); 
+  }
+
+
   // =========================
-
-  Serial.print("Movement: ");
-  Serial.print(movement, 3);
-
-  Serial.print(" | Intensity: ");
-  Serial.print(intensity);
-
-  Serial.print(" | Delay: ");
-  Serial.print(getDelayMs());
-
-  Serial.println(" ms");
-
-
+  // SAMPLE RATE
   // =========================
-  // SAVE PREVIOUS
-  // =========================
-
-  previousX = correctedAX;
-  previousY = correctedAY;
-  previousZ = correctedAZ;
-
 
   delay(50);
 }
