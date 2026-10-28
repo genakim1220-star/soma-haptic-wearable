@@ -14,11 +14,11 @@
 Adafruit_DRV2605 drv;
 
 
-// =========================
-// BUTTON
+// ========================= 
+// BUTTON 
 // =========================
 
-const int BUTTON_PIN = 25;
+const int BUTTON_PIN = 25; 
 
 bool motorEnabled = true;
 bool previousButtonState = HIGH;

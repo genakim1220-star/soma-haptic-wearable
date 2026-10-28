@@ -1,7 +1,16 @@
+// SOMA transmitter: mode display and adjustable MIX ratio.
+// Commands: ACC, GYRO, MIX, MIX 70 30, MIX 70, DELAY 0/3/5, CAL, STATUS, HELP.
+// Ratios are percentages (ACC first). Reset restores MIX 50/50 and DELAY 0.
+// Packet layout and nominal 50 ms loop delay match the original receiver.
+
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <math.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
 
 // =========================
 // MPU6050
@@ -16,10 +25,11 @@ const int MPU_ADDR = 0x68;
 enum SensorMode {
   ACCELERATION,
   GYRO,
-  ACCEL_GYRO
+  ACCEL_GYRO 
 };
 
 SensorMode sensorMode = ACCEL_GYRO;
+float accelWeight = 0.5f;
 
 // =========================
 // DELAY MODE
@@ -80,7 +90,7 @@ struct MotionPacket {
   float movement;
 
   uint8_t intensity;
-
+ 
   uint8_t sensorMode;
 
   uint16_t delayMs;
@@ -231,22 +241,59 @@ void calibrateSensor() {
 // SERIAL COMMAND
 // =========================
 
+
+const char *sensorModeName() {
+  if (sensorMode == ACCELERATION) return "ACC";
+  if (sensorMode == GYRO) return "GYRO";
+  return "MIX";
+}
+
+void printMixRatio() {
+  Serial.print("Mix ACC:");
+  Serial.print(accelWeight * 100.0f, 1);
+  Serial.print("% GYRO:");
+  Serial.print((1.0f - accelWeight) * 100.0f, 1);
+  Serial.print("%");
+}
+
+// One number means ACC percentage; two numbers must total 100.
+// Invalid commands leave the current mode and ratio unchanged.
+bool parseMixWeights(const char *text, float &newWeight) {
+  while (isspace((unsigned char)*text)) ++text;
+  char *end = nullptr;
+  errno = 0;
+  float acc = strtof(text, &end);
+  if (end == text || errno == ERANGE || !isfinite(acc) ||
+      acc < 0.0f || acc > 100.0f) return false;
+
+  if (*end && !isspace((unsigned char)*end)) return false;
+  text = end;
+  while (isspace((unsigned char)*text)) ++text;
+  if (*text) {
+    errno = 0;
+    float gyro = strtof(text, &end);
+    if (end == text || errno == ERANGE || !isfinite(gyro) ||
+        gyro < 0.0f || gyro > 100.0f) return false;
+    while (isspace((unsigned char)*end)) ++end;
+    if (*end || fabsf(acc + gyro - 100.0f) > 0.001f) return false;
+  }
+  newWeight = acc / 100.0f;
+  return true;
+}
+
+float mixNormalized(float acc, float gyro, float weight) {
+  return acc * weight + gyro * (1.0f - weight);
+}
+
 void printStatus() {
 
   Serial.println();
   Serial.println("========== STATUS ==========");
 
   Serial.print("Sensor Mode: ");
-
-  if (sensorMode == ACCELERATION)
-    Serial.println("ACCELERATION");
-
-  else if (sensorMode == GYRO)
-    Serial.println("GYRO");
-
-  else
-    Serial.println("ACC + GYRO");
-
+  Serial.println(sensorModeName());
+  printMixRatio();
+  Serial.println();
 
   Serial.print("Delay: ");
 
@@ -280,7 +327,10 @@ void printHelp() {
 
   Serial.println("ACC        -> Acceleration only");
   Serial.println("GYRO       -> Gyro only");
-  Serial.println("MIX        -> Acceleration + Gyro");
+  Serial.println("MIX        -> MIX mode, keep current ratio");
+  Serial.println("MIX 70 30  -> ACC 70%, GYRO 30%; select MIX");
+  Serial.println("MIX 70     -> Same as MIX 70 30");
+  Serial.println("Use 0..100 percentages; two values must total 100.");
 
   Serial.println("DELAY 0    -> Immediate");
   Serial.println("DELAY 3    -> 3 second delay");
@@ -295,12 +345,7 @@ void printHelp() {
 }
 
 
-void handleSerialCommand() {
-
-  if (!Serial.available())
-    return;
-
-  String command = Serial.readStringUntil('\n');
+void processSerialCommand(String command) {
 
   command.trim();
   command.toUpperCase();
@@ -326,11 +371,24 @@ void handleSerialCommand() {
   }
 
 
+  else if (command.startsWith("MIX ") || command.startsWith("MIX\t")) {
+    float newWeight = accelWeight;
+    if (!parseMixWeights(command.c_str() + 3, newWeight)) {
+      Serial.println("ERROR: Use MIX 70 30 (total 100) or MIX 70; range 0..100.");
+      return;
+    }
+    accelWeight = newWeight;
+    sensorMode = ACCEL_GYRO;
+    printStatus();
+  }
+
   else if (command == "MIX") {
 
     sensorMode = ACCEL_GYRO;
 
-    Serial.println("Sensor Mode → ACC + GYRO");
+    Serial.println("Sensor Mode -> MIX");
+    printMixRatio();
+    Serial.println();
   }
 
 
@@ -399,6 +457,32 @@ void handleSerialCommand() {
   }
 }
 
+
+
+// Read a complete line without Serial.readStringUntil() blocking motion sampling.
+// The sender still uses its original delay(50) at the end of loop().
+void handleSerialCommand() {
+  static char line[64];
+  static size_t used = 0;
+  static bool overflow = false;
+  unsigned int budget = 64;
+  while (budget-- > 0 && Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\r' || c == '\n') {
+      if (overflow) {
+        Serial.println("ERROR: Command too long; discarded.");
+      } else if (used > 0) {
+        line[used] = '\0';
+        processSerialCommand(String(line));
+      }
+      used = 0;
+      overflow = false;
+    } else if (!overflow) {
+      if (used + 1 < sizeof(line)) line[used++] = c;
+      else overflow = true;
+    }
+  }
+}
 
 // =========================
 // SETUP
@@ -509,6 +593,13 @@ void loop() {
   // ACCELERATION MOVEMENT
   // =========================
 
+  if (firstReading) {
+    previousX = correctedAX;
+    previousY = correctedAY;
+    previousZ = correctedAZ;
+    firstReading = false;
+  }
+
   float differenceX =
     abs(correctedAX - previousX);
 
@@ -597,10 +688,10 @@ void loop() {
   else if (sensorMode == ACCEL_GYRO) {
 
     movement =
-      (
-        accelerationNormalized * 0.5
-        +
-        gyroNormalized * 0.5
+      mixNormalized(
+        accelerationNormalized,
+        gyroNormalized,
+        accelWeight
       );
   }
 
@@ -653,7 +744,15 @@ void loop() {
   // SERIAL MONITOR
   // =========================
 
-  Serial.print("Movement: ");
+  Serial.print("Mode: ");
+  Serial.print(sensorModeName());
+  Serial.print(" | ");
+  printMixRatio();
+  Serial.print(" | ACC: ");
+  Serial.print(accelerationNormalized, 3);
+  Serial.print(" | GYRO: ");
+  Serial.print(gyroNormalized, 3);
+  Serial.print(" | Movement: ");
   Serial.print(movement, 3);
 
   Serial.print(" | Intensity: ");
@@ -668,7 +767,7 @@ void loop() {
   // =========================
   // SAVE PREVIOUS
   // =========================
-
+ 
   previousX = correctedAX;
   previousY = correctedAY;
   previousZ = correctedAZ;
