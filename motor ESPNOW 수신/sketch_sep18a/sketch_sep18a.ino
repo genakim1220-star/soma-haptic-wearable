@@ -1,4 +1,9 @@
+// SOMA receiver: quiet output with adjustable low-input response.
+
+
+
 #include <Arduino.h>
+#include <Preferences.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -56,8 +61,10 @@ bool buttonRaw = HIGH;
 bool buttonStable = HIGH;
 uint32_t buttonChangedAt = 0;
 
-uint8_t maxOutput = 70;    // Upper RTP command; NOT a percent or motor voltage.
-uint8_t floorOutput = 0;   // Optional minimum active command. No assumed motor floor.
+constexpr uint8_t DEFAULT_MAX = 70;
+constexpr uint8_t DEFAULT_MIN = 0;
+uint8_t maxOutput = DEFAULT_MAX;    // Upper RTP command; NOT a percent or motor voltage.
+uint8_t floorOutput = DEFAULT_MIN;   // Optional minimum active command. No assumed motor floor.
 float curveGamma = 0.8f;  // <1 gives low inputs more of the reduced output range.
 float deadZone = 0.01f;   // Ignore very small input; rest always produces zero.
 uint8_t lastOutput = 255; // Forces the first I2C update.
@@ -75,6 +82,71 @@ uint16_t observedDelay = 0;
 uint8_t observedMode = 255;
 uint32_t effectStartedAt = 0;
 uint32_t effectCheckedAt = 0;
+
+// Store both limits in one value so an interrupted edit cannot split the pair.
+constexpr char LIMITS_NAMESPACE[] = "soma-haptic";
+constexpr char LIMITS_KEY[] = "limits-v1";
+constexpr uint16_t MISSING_LIMITS = 0xFFFF;
+
+constexpr char MODE_KEY[] = "output-v1";
+// MOTION=0, SHAPE=1..123, PATTERN=257..379. Previews never change this key.
+constexpr uint16_t PATTERN_OFFSET = 256;
+
+void loadSettings() {
+  Preferences prefs;
+  if (!prefs.begin(LIMITS_NAMESPACE, false)) {
+    Serial.println("NVS unavailable: using default MIN/MAX.");
+    return;
+  }
+  uint16_t packed = prefs.getUShort(LIMITS_KEY, MISSING_LIMITS);
+  uint16_t mode = prefs.getUShort(MODE_KEY, 0);
+  prefs.end();
+  shapeId = mode >= 1 && mode <= 123 ? static_cast<uint8_t>(mode) : 0;
+  motionPattern = mode > PATTERN_OFFSET && mode <= PATTERN_OFFSET + 123
+                    ? static_cast<uint8_t>(mode - PATTERN_OFFSET) : 0;
+  uint8_t low = packed >> 8;
+  uint8_t high = packed & 0xFF;
+  if (low <= high && high <= 127) {
+    floorOutput = low;
+    maxOutput = high;
+  } else {
+    Serial.println("No valid saved limits: using default MIN/MAX.");
+  }
+}
+
+bool saveMode(uint16_t mode) {
+  Preferences prefs;
+  if (!prefs.begin(LIMITS_NAMESPACE, false)) {
+    Serial.println("ERROR: cannot open NVS. Mode command cancelled.");
+    return false;
+  }
+  bool saved = prefs.getUShort(MODE_KEY, MISSING_LIMITS) == mode;
+  if (!saved) saved = prefs.putUShort(MODE_KEY, mode) == sizeof(mode);
+  prefs.end();
+  if (!saved) Serial.println("ERROR: mode save failed. Command cancelled.");
+  return saved;
+}
+
+// Called only for validated serial commands. Apply new RAM values after commit.
+bool saveLimits(uint8_t low, uint8_t high) {
+  Preferences prefs;
+  if (!prefs.begin(LIMITS_NAMESPACE, false)) {
+    Serial.println("ERROR: cannot open NVS. MIN/MAX command cancelled.");
+    return false;
+  }
+  uint16_t packed = (static_cast<uint16_t>(low) << 8) | high;
+  bool saved = prefs.getUShort(LIMITS_KEY, MISSING_LIMITS) == packed;
+  if (!saved) saved = prefs.putUShort(LIMITS_KEY, packed) == sizeof(packed);
+  prefs.end();
+  if (!saved) {
+    Serial.println("ERROR: MIN/MAX save failed. Command cancelled.");
+    return false;
+  }
+  floorOutput = low;
+  maxOutput = high;
+  Serial.printf("SAVED MIN %u MAX %u\n", static_cast<unsigned>(low), static_cast<unsigned>(high));
+  return true;
+}
 
 float clamp01(float value) {
   if (value < 0.0f) return 0.0f;
@@ -405,6 +477,7 @@ void printSettings() {
 }
 
 void printHelp() {
+  Serial.println("MOTION, SHAPE n and PATTERN n are restored after power-off.");
   Serial.println("SHAPE 1..123: software approximation scaled by delayed motion; repeats while moving.");
   Serial.println("PATTERN 1..123: play on movement onset. Hold still first. MOTION: continuous RTP.");
   Serial.println("ONSET 0.10: trigger threshold (0.001..1). Release at half the threshold.");
@@ -417,7 +490,7 @@ void printHelp() {
   Serial.println("FLOOR is an alias for MIN.");
   Serial.println("GAMMA: 0.3..3.0; below 1 emphasizes low inputs within MAX.");
   Serial.println("DEAD: 0..0.2; inputs <= DEAD are silent.");
-  Serial.println("STATUS | DEFAULTS | HELP. Settings reset on power-off.");
+  Serial.println("STATUS | DEFAULTS | HELP. MIN/MAX persist after power-off; DEFAULTS saves MIN 0 MAX 70.");
   Serial.println("ACC/GYRO/MIX and DELAY commands still go to the SENDER.");
 }
 
@@ -430,7 +503,14 @@ void handleCommand(char *line) {
   char *extra = strtok_r(nullptr, " \t", &save);
   if (!argument) {
     if (strcmp(command, "STOP") == 0) { setMotorEnabled(false); return; }
-    if (strcmp(command, "MOTION") == 0) { shapeId = 0; motionPattern = 0; setMotorEnabled(true); return; }
+    if (strcmp(command, "MOTION") == 0) {
+      if (!saveMode(0)) return;
+      shapeId = 0;
+      motionPattern = 0;
+      setMotorEnabled(true);
+      Serial.println("SAVED MOTION");
+      return;
+    }
     if (strspn(command, "0123456789") == strlen(command)) {
       unsigned long id = strtoul(command, nullptr, 10);
       if (id > 123) Serial.println("ERROR: enter 1..123, or 0 to stop.");
@@ -441,7 +521,8 @@ void handleCommand(char *line) {
     if (strcmp(command, "STATUS") == 0) { printSettings(); return; }
     if (strcmp(command, "HELP") == 0) { printHelp(); return; }
     if (strcmp(command, "DEFAULTS") == 0) {
-      maxOutput = 70; floorOutput = 0; curveGamma = 0.8f; deadZone = 0.01f;
+      if (!saveLimits(DEFAULT_MIN, DEFAULT_MAX)) return;
+      curveGamma = 0.8f; deadZone = 0.01f;
       onset = 0.10f; patternArmed = false;
       printSettings();
       return;
@@ -459,9 +540,12 @@ void handleCommand(char *line) {
   if (strcmp(command, "PATTERN") == 0 || strcmp(command, "SHAPE") == 0) {
     valid = strspn(argument, "0123456789") == strlen(argument) && value >= 1 && value <= 123;
     if (valid) {
+      bool useShape = strcmp(command, "SHAPE") == 0;
+      uint8_t id = static_cast<uint8_t>(value);
+      if (!saveMode(useShape ? id : PATTERN_OFFSET + id)) return;
       endEffect();
       writeMotor(0);
-      bool useShape = strcmp(command, "SHAPE") == 0;
+      Serial.printf("SAVED %s %u\n", command, static_cast<unsigned>(id));
       shapeId = useShape ? static_cast<uint8_t>(value) : 0;
       motionPattern = useShape ? 0 : static_cast<uint8_t>(value);
       shapeRunning = false;
@@ -472,10 +556,10 @@ void handleCommand(char *line) {
     if (valid) { onset = value; patternArmed = false; }
   } else if (strcmp(command, "MAX") == 0) {
     valid = value >= floorOutput && value <= 127 && floorf(value) == value;
-    if (valid) maxOutput = static_cast<uint8_t>(value);
+    if (valid && !saveLimits(floorOutput, static_cast<uint8_t>(value))) return;
   } else if (strcmp(command, "MIN") == 0 || strcmp(command, "FLOOR") == 0) {
     valid = value >= 0 && value <= maxOutput && floorf(value) == value;
-    if (valid) floorOutput = static_cast<uint8_t>(value);
+    if (valid && !saveLimits(static_cast<uint8_t>(value), maxOutput)) return;
   } else if (strcmp(command, "GAMMA") == 0) {
     valid = value >= 0.3f && value <= 3.0f;
     if (valid) curveGamma = value;
@@ -527,6 +611,7 @@ void haltWithError(const char *message) {
 
 void setup() {
   Serial.begin(115200);
+  loadSettings();
   Wire.begin(21, 22);
   if (!drv.begin()) haltWithError("DRV2605L NOT FOUND");
   drv.useERM();
